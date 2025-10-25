@@ -1,0 +1,5 @@
+to deploy locally with hardhat : 
+
+npx hardhat node // to spins up a local Ethereum network on http://127.0.0.1:8545 with accounts having fake eth
+npx hardhat run scripts/deploy.js --network localhost // for deploying the contract
+

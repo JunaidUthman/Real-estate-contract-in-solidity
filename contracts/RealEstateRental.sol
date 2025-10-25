@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
 
 contract RealEstateRental is ReentrancyGuard, Ownable {
     
@@ -170,7 +171,20 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         require(_durationInMonths > 0, "Duration must be at least 1 month");
         
         uint256 totalInitialPayment = property.rentPerMonth + property.securityDeposit;
-        require(msg.value == totalInitialPayment, "Incorrect payment amount");
+        // Version avec message détaillé
+        if (msg.value != totalInitialPayment) {
+            revert(
+                string(
+                    abi.encodePacked(
+                        "Payment mismatch. Required: ",
+                        Strings.toString(totalInitialPayment),
+                        " wei, Sent: ",
+                        Strings.toString(msg.value),
+                        " wei"
+                    )
+                )
+            );
+        }
         
         agreementCounter++;
         uint256 startDate = block.timestamp;
