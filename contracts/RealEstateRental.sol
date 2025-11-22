@@ -231,10 +231,10 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         require(msg.value == agreement.rentAmount, "Incorrect rent amount");
         
         // Check if at least 25 days have passed since last payment
-        require(
-            block.timestamp >= agreement.lastPaymentDate + 25 days,
-            "Too soon for next payment"
-        );
+        // require(
+        //     block.timestamp >= agreement.lastPaymentDate + 25 days,
+        //     "Too soon for next payment"
+        // );
         
         agreement.lastPaymentDate = block.timestamp;
         agreement.totalPaid += msg.value;
