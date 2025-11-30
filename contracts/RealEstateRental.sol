@@ -44,7 +44,7 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
     
     // Enums
     enum AgreementStatus {
-        PENDING,
+        PENDING_RESERVATION,// this state is when made the reservation but didnt get the key of the house yet
         ACTIVE,
         COMPLETED,
         TERMINATED,
@@ -159,35 +159,23 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
     }
     
     // Rental Agreement Functions
-    function createRentalAgreement(//the payable mark means that this function can receive ether(from the one who calls) throw msg.value, so we can use functions like transfare or send to redirect the money to another address
+    function reserveProperty(
         uint256 _propertyId,
         uint256 _durationInMonths
-        
-    ) external payable propertyExists(_propertyId) nonReentrant {
+    ) external payable propertyExists(_propertyId) nonReentrant returns (uint256) {
         Property storage property = properties[_propertyId];
         require(property.isAvailable, "Property not available");
         require(property.isActive, "Property not active");
         require(msg.sender != property.owner, "Owner cannot rent own property");
         require(_durationInMonths > 0, "Duration must be at least 1 month");
         
+        // Le montant initial requis (Dépôt + 1er Loyer)
         uint256 totalInitialPayment = property.rentPerMonth + property.securityDeposit;
-        // Version avec message détaillé
-        if (msg.value != totalInitialPayment) {
-            revert(
-                string(
-                    abi.encodePacked(
-                        "Payment mismatch. Required: ",
-                        Strings.toString(totalInitialPayment),
-                        " wei, Sent: ",
-                        Strings.toString(msg.value),
-                        " wei"
-                    )
-                )
-            );
-        }
-        
+        require(msg.value == totalInitialPayment, "Payment mismatch: initial funds required for reservation");
+
         agreementCounter++;
         uint256 startDate = block.timestamp;
+        // On fixe l'End Date même si l'accord n'est pas encore ACTIF
         uint256 endDate = startDate + (_durationInMonths * 30 days);
         
         rentalAgreements[agreementCounter] = RentalAgreement({
@@ -197,25 +185,55 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
             landlord: property.owner,
             rentAmount: property.rentPerMonth,
             securityDeposit: property.securityDeposit,
-            startDate: startDate,
+            startDate: startDate, // Date de début de l'Escrow
             endDate: endDate,
-            lastPaymentDate: startDate,
-            status: AgreementStatus.ACTIVE,
-            totalPaid: property.rentPerMonth
+            lastPaymentDate: 0, // Pas de paiement transféré au Landlord
+            status: AgreementStatus.PENDING_RESERVATION, // Statut de séquestre
+            totalPaid: msg.value // Le montant total payé au contrat (pour le moment)
         });
         
         property.isAvailable = false;
         tenantAgreements[msg.sender].push(agreementCounter);
         
-        // Transfer first month rent to landlord (minus platform fee)
-        uint256 platformFee = (property.rentPerMonth * platformFeePercentage) / 100;
-        uint256 landlordAmount = property.rentPerMonth - platformFee;
-        accumulatedPlatformFees += platformFee;
-        
-        property.owner.transfer(landlordAmount);//this function transfers the landlordAmount(the amount is gonna be msg.value) to the property owner
+        // NOTE IMPORTANTE : AUCUN TRANSFERT AU PROPRIÉTAIRE ICI. L'Éther (msg.value) reste dans le contrat RealEstateRental.
         
         emit AgreementCreated(agreementCounter, _propertyId, msg.sender, property.owner);
-        emit RentPaid(agreementCounter, property.rentPerMonth, block.timestamp);
+        
+        return agreementCounter;
+    }
+
+
+    function activateAgreement(uint256 _agreementId) 
+        external 
+        agreementExists(_agreementId) 
+        nonReentrant 
+    {
+        RentalAgreement storage agreement = rentalAgreements[_agreementId];
+        require(agreement.tenant == msg.sender, "Only tenant can activate agreement");
+        require(agreement.status == AgreementStatus.PENDING_RESERVATION, "Agreement is not in PENDING_RESERVATION status");
+        
+        // Mise à jour du statut
+        agreement.status = AgreementStatus.ACTIVE;
+        
+        // Le premier loyer est le Rent Amount. Le reste (Security Deposit) reste en séquestre
+        uint256 firstMonthRent = agreement.rentAmount;
+        
+        // Calcul de la commission
+        uint256 platformFee = (firstMonthRent * platformFeePercentage) / 100;
+        uint256 landlordAmount = firstMonthRent - platformFee;
+        accumulatedPlatformFees += platformFee;
+        
+        // Transfert du premier loyer (net de frais) au propriétaire. Le Dépôt de garantie reste dans le contrat.
+        agreement.landlord.transfer(landlordAmount);
+        
+        // Mise à jour de la date du dernier paiement (le premier paiement)
+        agreement.lastPaymentDate = block.timestamp;
+        
+        // Mettre à jour totalPaid pour refléter uniquement les loyers (ou ajuster la sémantique si nécessaire)
+        // Pour cet exemple, nous considérons le premier loyer comme payé au Landlord.
+        
+        emit RentPaid(_agreementId, firstMonthRent, block.timestamp);
+        emit AgreementCompleted(_agreementId); // Similaire à une activation formelle
     }
     
     function payMonthlyRent(uint256 _agreementId) 
