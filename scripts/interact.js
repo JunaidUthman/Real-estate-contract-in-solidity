@@ -9,7 +9,7 @@ async function main() {
     const [owner, landlord, tenant] = await hre.ethers.getSigners();
     
     const RealEstateRental = await hre.ethers.getContractFactory("RealEstateRental");
-    const contract = RealEstateRental.attach(deploymentInfo.contractAddress);
+    const contracat = RealEstateRental.attach(deploymentInfo.contractAddress);
     
     // Example 1: List a property
     console.log("\n=== Listing Property ===");
