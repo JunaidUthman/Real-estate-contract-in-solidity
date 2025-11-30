@@ -102,7 +102,7 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
     }
     
     // Property Management Functions
-    function listProperty( //this function creates a new property owned by the msg.sender(landloard)
+    function listProperty( // this function creates a new property owned by the msg.sender(landloard)
         string memory _propertyAddress,
         string memory _description,
         uint256 _rentPerMonth,
