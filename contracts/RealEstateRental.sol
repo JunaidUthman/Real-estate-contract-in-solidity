@@ -7,13 +7,34 @@ import "@openzeppelin/contracts/utils/Strings.sol";
 
 contract RealEstateRental is ReentrancyGuard, Ownable {
     
+    // Enums
+    enum RentUnit {
+        MONTHLY, // Loyer de base par mois
+        DAILY    // Loyer de base par jour
+    }
+
+    enum AgreementStatus {
+        PENDING_RESERVATION,// this state is when made the reservation but didnt get the key of the house yet
+        ACTIVE,
+        COMPLETED,
+        TERMINATED,
+        DISPUTED
+    }
+    
+    enum DisputeStatus {
+        OPEN,
+        RESOLVED,
+        REJECTED
+    }
+
     // Structs
     struct Property {
         uint256 id;
         address payable owner;
         string propertyAddress;
         string description;
-        uint256 rentPerMonth;
+        uint256 rentBaseAmount; // Montant de base du loyer (par mois ou par jour) [NEW]
+        RentUnit unit;          // Unité de loyer (MONTHLY ou DAILY) [NEW]
         uint256 securityDeposit;
         bool isAvailable;
         bool isActive;
@@ -24,7 +45,8 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         uint256 propertyId;
         address payable tenant;
         address payable landlord;
-        uint256 rentAmount;
+        uint256 rentAmount;      // Montant de base stocké (par mois ou par jour)
+        RentUnit unit;           // Unité de loyer de l'accord [NEW]
         uint256 securityDeposit;
         uint256 startDate;
         uint256 endDate;
@@ -42,26 +64,12 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         uint256 createdAt;
     }
     
-    // Enums
-    enum AgreementStatus {
-        PENDING_RESERVATION,// this state is when made the reservation but didnt get the key of the house yet
-        ACTIVE,
-        COMPLETED,
-        TERMINATED,
-        DISPUTED
-    }
-    
-    enum DisputeStatus {
-        OPEN,
-        RESOLVED,
-        REJECTED
-    }
-    
     // State variables
     uint256 public propertyCounter;
     uint256 public agreementCounter;
     uint256 public disputeCounter;
-    uint256 public platformFeePercentage = 2; // 2% platform fee
+    uint256 public platformFeePercentage = 2;
+    // 2% platform fee
     uint256 public accumulatedPlatformFees;
 
     
@@ -73,16 +81,17 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
     
     // Events : an event is a special way for your smart contract to communicate with the outside world
     //When you “emit” an event, it’s like writing a log entry to the blockchain.
-    event PropertyListed(uint256 indexed propertyId, address indexed owner, uint256 rentPerMonth);
+    event PropertyListed(uint256 indexed propertyId, address indexed owner, uint256 rentBaseAmount, RentUnit unit); // Mise à jour de l'event [UPDATED]
     event PropertyDelisted(uint256 indexed propertyId);
     event AgreementCreated(uint256 indexed agreementId, uint256 indexed propertyId, address tenant, address landlord);
+    event AgreementActivated(uint256 indexed agreementId); // Nouveau event [NEW]
     event RentPaid(uint256 indexed agreementId, uint256 amount, uint256 timestamp);
     event AgreementCompleted(uint256 indexed agreementId);
     event AgreementTerminated(uint256 indexed agreementId, address terminatedBy);
     event DisputeCreated(uint256 indexed disputeId, uint256 indexed agreementId, address initiator);
     event DisputeResolved(uint256 indexed disputeId, bool favorLandlord);
     event SecurityDepositReturned(uint256 indexed agreementId, address tenant, uint256 amount);
-    
+
     constructor(){}
     
     // Modifiers
@@ -92,12 +101,14 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
     }
     
     modifier propertyExists(uint256 _propertyId) {
-        require(_propertyId > 0 && _propertyId <= propertyCounter, "Property does not exist");
+        require(_propertyId > 0 && properties[_propertyId].id == _propertyId, "Property does not exist");
+        // Correction: utiliser l'ID pour vérifier l'existence
         _;
     }
     
     modifier agreementExists(uint256 _agreementId) {
-        require(_agreementId > 0 && _agreementId <= agreementCounter, "Agreement does not exist");
+        require(_agreementId > 0 && rentalAgreements[_agreementId].agreementId == _agreementId, "Agreement does not exist");
+        // Correction: utiliser l'ID pour vérifier l'existence
         _;
     }
     
@@ -105,20 +116,21 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
     function listProperty( // this function creates a new property owned by the msg.sender(landloard)
         string memory _propertyAddress,
         string memory _description,
-        uint256 _rentPerMonth,
-        uint256 _securityDeposit
+        uint256 _rentBaseAmount,
+        uint256 _securityDeposit,
+        RentUnit _unit // Nouveau paramètre pour l'unité [NEW]
     ) external returns (uint256) {
-        require(_rentPerMonth > 0, "Rent must be greater than 0");
-        require(_securityDeposit > 0, "Security deposit must be greater than 0");
+        require(_rentBaseAmount > 0, "Rent must be greater than 0");
+        // Suppression de l'exigence `require(_securityDeposit > 0, ...)` pour permettre $0 de dépôt. [UPDATED]
         
         propertyCounter++;
-        
         properties[propertyCounter] = Property({
             id: propertyCounter,
             owner: payable(msg.sender),
             propertyAddress: _propertyAddress,
             description: _description,
-            rentPerMonth: _rentPerMonth,
+            rentBaseAmount: _rentBaseAmount,
+            unit: _unit, // Stockage de la nouvelle unité [NEW]
             securityDeposit: _securityDeposit,
             isAvailable: true,
             isActive: true
@@ -126,7 +138,7 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         
         landlordProperties[msg.sender].push(propertyCounter);
         
-        emit PropertyListed(propertyCounter, msg.sender, _rentPerMonth);
+        emit PropertyListed(propertyCounter, msg.sender, _rentBaseAmount, _unit); // Mise à jour de l'event [UPDATED]
         return propertyCounter;
     }
     
@@ -134,18 +146,20 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         uint256 _propertyId,
         string memory _propertyAddress,
         string memory _description,
-        uint256 _rentPerMonth,
+        uint256 _rentBaseAmount, // Renommé [UPDATED]
         uint256 _securityDeposit,
-        bool _isAvailable
+        bool _isAvailable,
+        RentUnit _unit // Ajouté [NEW]
     ) external propertyExists(_propertyId) onlyPropertyOwner(_propertyId) {
         Property storage property = properties[_propertyId];
         require(property.isActive, "Property is not active");
         
         property.propertyAddress = _propertyAddress;
         property.description = _description;
-        property.rentPerMonth = _rentPerMonth;
+        property.rentBaseAmount = _rentBaseAmount; // Renommé [UPDATED]
         property.securityDeposit = _securityDeposit;
         property.isAvailable = _isAvailable;
+        property.unit = _unit; // Ajouté [NEW]
     }
     
     function delistProperty(uint256 _propertyId) 
@@ -161,29 +175,43 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
     // Rental Agreement Functions
     function reserveProperty(
         uint256 _propertyId,
-        uint256 _durationInMonths
+        uint256 _durationInMonths,
+        uint256 _optionalAdditionalDays // Permet une durée précise en jours, même pour les mois [NEW]
     ) external payable propertyExists(_propertyId) nonReentrant returns (uint256) {
         Property storage property = properties[_propertyId];
         require(property.isAvailable, "Property not available");
         require(property.isActive, "Property not active");
         require(msg.sender != property.owner, "Owner cannot rent own property");
-        require(_durationInMonths > 0, "Duration must be at least 1 month");
+        require(_durationInMonths > 0 || _optionalAdditionalDays > 0, "Duration must be at least 1 day or 1 month"); // Ajustement [UPDATED]
+
+        uint256 firstPaymentAmount;
         
+        // Calcul du premier paiement (Le premier loyer + le dépôt)
+        if (property.unit == RentUnit.MONTHLY) {
+            // Pour les locations mensuelles, le 1er paiement est toujours 1 mois de loyer.
+            firstPaymentAmount = property.rentBaseAmount;
+        } else if (property.unit == RentUnit.DAILY) {
+            // Pour les locations journalières, le 1er paiement est 1 jour de loyer.
+            firstPaymentAmount = property.rentBaseAmount; 
+        }
+
         // Le montant initial requis (Dépôt + 1er Loyer)
-        uint256 totalInitialPayment = property.rentPerMonth + property.securityDeposit;
+        uint256 totalInitialPayment = firstPaymentAmount + property.securityDeposit;
         require(msg.value == totalInitialPayment, "Payment mismatch: initial funds required for reservation");
 
         agreementCounter++;
         uint256 startDate = block.timestamp;
-        // On fixe l'End Date même si l'accord n'est pas encore ACTIF
-        uint256 endDate = startDate + (_durationInMonths * 30 days);
+        
+        // Calcul de la date de fin en utilisant les mois et les jours additionnels [UPDATED]
+        uint256 endDate = startDate + (_durationInMonths * 30 days) + (_optionalAdditionalDays * 1 days);
         
         rentalAgreements[agreementCounter] = RentalAgreement({
             agreementId: agreementCounter,
             propertyId: _propertyId,
             tenant: payable(msg.sender),
             landlord: property.owner,
-            rentAmount: property.rentPerMonth,
+            rentAmount: property.rentBaseAmount, // Stocke le montant de base (par mois ou par jour)
+            unit: property.unit, // Stocke l'unité de loyer
             securityDeposit: property.securityDeposit,
             startDate: startDate, // Date de début de l'Escrow
             endDate: endDate,
@@ -191,12 +219,10 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
             status: AgreementStatus.PENDING_RESERVATION, // Statut de séquestre
             totalPaid: msg.value // Le montant total payé au contrat (pour le moment)
         });
-        
         property.isAvailable = false;
         tenantAgreements[msg.sender].push(agreementCounter);
         
         // NOTE IMPORTANTE : AUCUN TRANSFERT AU PROPRIÉTAIRE ICI. L'Éther (msg.value) reste dans le contrat RealEstateRental.
-        
         emit AgreementCreated(agreementCounter, _propertyId, msg.sender, property.owner);
         
         return agreementCounter;
@@ -212,18 +238,24 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         require(agreement.tenant == msg.sender, "Only tenant can activate agreement");
         require(agreement.status == AgreementStatus.PENDING_RESERVATION, "Agreement is not in PENDING_RESERVATION status");
         
+        // Calcul du premier loyer payé lors de la réservation
+        uint256 firstRentAmount;
+        if (agreement.unit == RentUnit.MONTHLY) {
+            firstRentAmount = agreement.rentAmount;
+        } else if (agreement.unit == RentUnit.DAILY) {
+            firstRentAmount = agreement.rentAmount; // Correspond au montant initial de 1 jour de loyer
+        }
+        
         // Mise à jour du statut
         agreement.status = AgreementStatus.ACTIVE;
         
-        // Le premier loyer est le Rent Amount. Le reste (Security Deposit) reste en séquestre
-        uint256 firstMonthRent = agreement.rentAmount;
-        
         // Calcul de la commission
-        uint256 platformFee = (firstMonthRent * platformFeePercentage) / 100;
-        uint256 landlordAmount = firstMonthRent - platformFee;
+        uint256 platformFee = (firstRentAmount * platformFeePercentage) / 100;
+        uint256 landlordAmount = firstRentAmount - platformFee;
         accumulatedPlatformFees += platformFee;
         
-        // Transfert du premier loyer (net de frais) au propriétaire. Le Dépôt de garantie reste dans le contrat.
+        // Transfert du premier loyer (net de frais) au propriétaire. 
+        // Le Dépôt de garantie reste dans le contrat.
         agreement.landlord.transfer(landlordAmount);
         
         // Mise à jour de la date du dernier paiement (le premier paiement)
@@ -231,13 +263,14 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         
         // Mettre à jour totalPaid pour refléter uniquement les loyers (ou ajuster la sémantique si nécessaire)
         // Pour cet exemple, nous considérons le premier loyer comme payé au Landlord.
-        
-        emit RentPaid(_agreementId, firstMonthRent, block.timestamp);
-        emit AgreementCompleted(_agreementId); // Similaire à une activation formelle
+        emit RentPaid(_agreementId, firstRentAmount, block.timestamp);
+        emit AgreementActivated(_agreementId); // Utilisation d'un événement plus sémantique pour l'activation [UPDATED]
     }
     
-    function payMonthlyRent(uint256 _agreementId) 
-        external 
+    function payRent( // Fonction générique pour le loyer mensuel ou journalier [UPDATED]
+        uint256 _agreementId,
+        uint256 _amountInUnits // Le nombre de mois ou de jours payés. 1 pour loyer mensuel, 1 pour loyer journalier. [NEW]
+    ) external 
         payable 
         agreementExists(_agreementId) 
         nonReentrant 
@@ -246,13 +279,34 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         require(agreement.tenant == msg.sender, "Not the tenant");
         require(agreement.status == AgreementStatus.ACTIVE, "Agreement not active");
         require(block.timestamp <= agreement.endDate, "Agreement expired");
-        require(msg.value == agreement.rentAmount, "Incorrect rent amount");
+        require(_amountInUnits > 0, "Amount must be greater than zero"); // Montant doit être > 0 [NEW]
         
-        // Check if at least 25 days have passed since last payment
-        // require(
-        //     block.timestamp >= agreement.lastPaymentDate + 25 days,
-        //     "Too soon for next payment"
-        // );
+        uint256 expectedPayment;
+
+        if (agreement.unit == RentUnit.MONTHLY) {
+            // Loyer mensuel : on s'attend à ce que _amountInUnits soit 1 pour un mois complet
+            require(_amountInUnits == 1, "Monthly rent payment must be for 1 month");
+            expectedPayment = agreement.rentAmount;
+            
+            // Vérification du temps minimum écoulé (25 jours pour le loyer mensuel) [NEW]
+            require(
+                block.timestamp >= agreement.lastPaymentDate + 25 days,
+                "Too soon for next monthly payment"
+            );
+
+        } else if (agreement.unit == RentUnit.DAILY) {
+            // Loyer journalier : on impose un paiement d'une seule journée par transaction. [MODIFIED]
+            require(_amountInUnits == 1, "Daily rent payment must be for 1 day only"); // Nouvelle restriction
+            expectedPayment = agreement.rentAmount * _amountInUnits; // Qui est simplement agreement.rentAmount
+            
+            // Vérification du temps minimum écoulé (1 jour pour le loyer journalier) [NEW]
+             require(
+                block.timestamp >= agreement.lastPaymentDate + 1 days,
+                "Too soon for next daily payment"
+            );
+        }
+
+        require(msg.value == expectedPayment, "Incorrect rent amount for the specified period");
         
         agreement.lastPaymentDate = block.timestamp;
         agreement.totalPaid += msg.value;
@@ -266,6 +320,7 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         
         emit RentPaid(_agreementId, msg.value, block.timestamp);
     }
+    
     
     function completeAgreement(uint256 _agreementId) 
         external 
@@ -282,12 +337,14 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         
         agreement.status = AgreementStatus.COMPLETED;
         properties[agreement.propertyId].isAvailable = true;
-        
         // Return security deposit to tenant
-        agreement.tenant.transfer(agreement.securityDeposit);
+        // Ce transfert est $0 si securityDeposit était $0.
+        agreement.tenant.transfer(agreement.securityDeposit); 
         
-        emit AgreementCompleted(_agreementId);
-        emit SecurityDepositReturned(_agreementId, agreement.tenant, agreement.securityDeposit);
+        emit AgreementCompleted(_agreementId); // Événement pour la FIN réelle du contrat.
+        if (agreement.securityDeposit > 0) { // Conditionnel pour l'event
+            emit SecurityDepositReturned(_agreementId, agreement.tenant, agreement.securityDeposit);
+        }
     }
     
     function terminateAgreement(uint256 _agreementId) 
@@ -304,19 +361,20 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         
         agreement.status = AgreementStatus.TERMINATED;
         properties[agreement.propertyId].isAvailable = true;
-        
-        // If tenant terminates, landlord keeps security deposit
-        // If landlord terminates, return security deposit to tenant
+        // Si tenant terminates, landlord keeps security deposit ($0 si dépôt nul)
+        // Si landlord terminates, return security deposit to tenant ($0 si dépôt nul)
         if (msg.sender == agreement.landlord) {
             agreement.tenant.transfer(agreement.securityDeposit);
-            emit SecurityDepositReturned(_agreementId, agreement.tenant, agreement.securityDeposit);
+             if (agreement.securityDeposit > 0) { // Conditionnel pour l'event
+                emit SecurityDepositReturned(_agreementId, agreement.tenant, agreement.securityDeposit);
+            }
         } else {
-            agreement.landlord.transfer(agreement.securityDeposit);
+            agreement.landlord.transfer(agreement.securityDeposit); // Transfert $0 si dépôt nul
         }
         
         emit AgreementTerminated(_agreementId, msg.sender);
     }
-    
+
     // Dispute Management Functions
     function createDispute(uint256 _agreementId, string memory _reason) 
         external 
@@ -332,7 +390,6 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
             agreement.status == AgreementStatus.COMPLETED,
             "Invalid agreement status"
         );
-        
         disputeCounter++;
         
         disputes[disputeCounter] = Dispute({
@@ -343,7 +400,6 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
             status: DisputeStatus.OPEN,
             createdAt: block.timestamp
         });
-        
         agreement.status = AgreementStatus.DISPUTED;
         
         emit DisputeCreated(disputeCounter, _agreementId, msg.sender);
@@ -361,13 +417,15 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         dispute.status = DisputeStatus.RESOLVED;
         agreement.status = AgreementStatus.COMPLETED;
         properties[agreement.propertyId].isAvailable = true;
-        
         // Handle security deposit based on resolution
+        // Transfert $0 si le dépôt est nul.
         if (_favorLandlord) {
             agreement.landlord.transfer(agreement.securityDeposit);
         } else {
             agreement.tenant.transfer(agreement.securityDeposit);
-            emit SecurityDepositReturned(dispute.agreementId, agreement.tenant, agreement.securityDeposit);
+            if (agreement.securityDeposit > 0) { // Conditionnel pour l'event
+                emit SecurityDepositReturned(dispute.agreementId, agreement.tenant, agreement.securityDeposit);
+            }
         }
         
         emit DisputeResolved(_disputeId, _favorLandlord);
@@ -419,7 +477,6 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
     
     function getAvailableProperties() external view returns (uint256[] memory) {
         uint256 availableCount = 0;
-        
         // Count available properties
         for (uint256 i = 1; i <= propertyCounter; i++) {
             if (properties[i].isAvailable && properties[i].isActive) {
@@ -440,10 +497,11 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         
         return availableProperties;// this arry contains the ids of available properties
     }
-    
+
     // Admin Functions
     function setPlatformFee(uint256 _newFeePercentage) external onlyOwner {
-        require(_newFeePercentage <= 10, "Fee too high"); // Max 10%
+        require(_newFeePercentage <= 10, "Fee too high");
+        // Max 10%
         platformFeePercentage = _newFeePercentage;
     }
     
