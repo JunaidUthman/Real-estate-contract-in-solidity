@@ -34,7 +34,7 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         string propertyAddress;
         string description;
         uint256 rentBaseAmount; // Montant de base du loyer (par mois ou par jour) [NEW]
-        RentUnit unit;          // Unité de loyer (MONTHLY ou DAILY) [NEW]
+        RentUnit unit;          // Unité de loyer (MONTHLY ou DAILY)
         uint256 securityDeposit;
         bool isAvailable;
         bool isActive;
@@ -307,6 +307,35 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         }
 
         require(msg.value == expectedPayment, "Incorrect rent amount for the specified period");
+
+        // ---------------------------------------------------------
+        // 2. NOUVELLE SÉCURITÉ : Vérification du Plafond Total
+        // ---------------------------------------------------------
+        
+        // Calcul de la durée totale du contrat
+        uint256 contractDuration = agreement.endDate - agreement.startDate;
+        uint256 maxTotalRent;
+
+        if (agreement.unit == RentUnit.MONTHLY) {
+            // Combien de mois au total dans le contrat ?
+            // On divise par 30 days car c'est l'unité utilisée dans reserveProperty
+            uint256 totalMonths = contractDuration / 30 days;
+            maxTotalRent = totalMonths * agreement.rentAmount;
+        } else {
+            // Combien de jours au total ?
+            uint256 totalDays = contractDuration / 1 days;
+            maxTotalRent = totalDays * agreement.rentAmount;
+        }
+
+        // Le montant maximum que le contrat doit recevoir au total (Loyers + Caution)
+        // On inclut la caution car agreement.totalPaid l'inclut déjà (payée à la réservation).
+        uint256 maxPayableAmount = maxTotalRent + agreement.securityDeposit;
+
+        require(
+            agreement.totalPaid + msg.value <= maxPayableAmount, 
+            "Overpayment: Contract duration fully paid"
+        );
+        // ---------------------------------------------------------
         
         agreement.lastPaymentDate = block.timestamp;
         agreement.totalPaid += msg.value;
