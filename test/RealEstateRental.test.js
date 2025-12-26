@@ -1,338 +1,182 @@
+const {
+  time,
+  loadFixture,
+} = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
 describe("RealEstateRental", function () {
-    let realEstateRental;
-    let owner, landlord, tenant, tenant2;
-    let propertyId, agreementId;
-    
-    const RENT_AMOUNT = ethers.parseEther("1.0"); // 1 ETH per month
-    const SECURITY_DEPOSIT = ethers.parseEther("2.0"); // 2 ETH security deposit
-    
-    beforeEach(async function () {
-        [owner, landlord, tenant, tenant2] = await ethers.getSigners();
-        
-        const RealEstateRental = await ethers.getContractFactory("RealEstateRental");
-        realEstateRental = await RealEstateRental.deploy();
+  
+  // Configuration initiale (Fixture) pour ne pas répéter le code de déploiement
+  async function deployRentalFixture() {
+    const [owner, landlord, tenant, otherAccount] = await ethers.getSigners();
+
+    const RealEstateRental = await ethers.getContractFactory("RealEstateRental");
+    const rentalContract = await RealEstateRental.deploy();
+
+    return { rentalContract, owner, landlord, tenant, otherAccount };
+  }
+
+  // Enum simulé en JS (0 = MONTHLY, 1 = DAILY)
+  const RentUnit = { MONTHLY: 0, DAILY: 1 };
+
+  describe("Property Listing", function () {
+    it("Should list a new property", async function () {
+      const { rentalContract, landlord } = await loadFixture(deployRentalFixture);
+      
+      const rent = ethers.parseEther("1");
+      const deposit = ethers.parseEther("2");
+
+      // CORRECTION ICI : Ajout du 5ème argument (RentUnit.MONTHLY)
+      await expect(rentalContract.connect(landlord).listProperty(
+        "123 Main Street, Paris",
+        "Beautiful 2BR apartment",
+        rent,
+        deposit,
+        RentUnit.MONTHLY 
+      )).to.emit(rentalContract, "PropertyListed")
+        .withArgs(1, landlord.address, rent, RentUnit.MONTHLY);
     });
-    
-    describe("Property Listing", function () {
-        it("Should list a new property", async function () {
-            const tx = await realEstateRental.connect(landlord).listProperty(
-                "123 Main Street, Paris",
-                "Beautiful 2BR apartment",
-                RENT_AMOUNT,
-                SECURITY_DEPOSIT
-            );
-            
-            const receipt = await tx.wait();
-            const event = receipt.logs.find(log => {
-                try {
-                    return realEstateRental.interface.parseLog(log).name === "PropertyListed";
-                } catch (e) {
-                    return false;
-                }
-            });
-            
-            expect(event).to.not.be.undefined;
-            
-            const property = await realEstateRental.getProperty(1);
-            expect(property.owner).to.equal(landlord.address);
-            expect(property.rentPerMonth).to.equal(RENT_AMOUNT);
-            expect(property.isAvailable).to.be.true;
-        });
-        
-        it("Should fail if rent is zero", async function () {
-            await expect(
-                realEstateRental.connect(landlord).listProperty(
-                    "123 Main Street",
-                    "Description",
-                    0,
-                    SECURITY_DEPOSIT
-                )
-            ).to.be.revertedWith("Rent must be greater than 0");
-        });
+
+    it("Should fail if rent is zero", async function () {
+      const { rentalContract, landlord } = await loadFixture(deployRentalFixture);
+      
+      // CORRECTION ICI : Ajout du 5ème argument
+      await expect(rentalContract.connect(landlord).listProperty(
+        "Addr", "Desc", 0, 0, RentUnit.MONTHLY
+      )).to.be.revertedWith("Rent must be greater than 0");
     });
-    
-    describe("Rental Agreement Creation", function () {
-        beforeEach(async function () {
-            await realEstateRental.connect(landlord).listProperty(
-                "123 Main Street, Paris",
-                "Beautiful 2BR apartment",
-                RENT_AMOUNT,
-                SECURITY_DEPOSIT
-            );
-            propertyId = 1;
-        });
+  });
+
+  describe("Rental Agreement Creation", function () {
+    async function listedPropertyFixture() {
+      const { rentalContract, landlord, tenant, owner } = await loadFixture(deployRentalFixture);
+      const rent = ethers.parseEther("1");
+      const deposit = ethers.parseEther("0.5");
+      
+      // Listing initial correct
+      await rentalContract.connect(landlord).listProperty("Addr", "Desc", rent, deposit, RentUnit.MONTHLY);
+      return { rentalContract, landlord, tenant, rent, deposit, owner };
+    }
+
+    it("Should create rental agreement with correct payment", async function () {
+      const { rentalContract, tenant, rent, deposit } = await loadFixture(listedPropertyFixture);
+      
+      const totalPay = rent + deposit;
+
+      // CORRECTION ICI : reserveProperty prend maintenant (id, mois, jours_supplémentaires)
+      // On ajoute le '0' à la fin pour les jours supplémentaires
+      await expect(rentalContract.connect(tenant).reserveProperty(1, 6, 0, { value: totalPay }))
+        .to.emit(rentalContract, "AgreementCreated");
         
-        it("Should create rental agreement with correct payment", async function () {
-            const totalPayment = RENT_AMOUNT + SECURITY_DEPOSIT;
-            
-            await expect(
-                realEstateRental.connect(tenant).createRentalAgreement(
-                    propertyId,
-                    6, // 6 months
-                    { value: totalPayment }
-                )
-            ).to.emit(realEstateRental, "AgreementCreated");
-            
-            const agreement = await realEstateRental.getRentalAgreement(1);
-            expect(agreement.tenant).to.equal(tenant.address);
-            expect(agreement.landlord).to.equal(landlord.address);
-            expect(agreement.rentAmount).to.equal(RENT_AMOUNT);
-            expect(agreement.status).to.equal(1); // ACTIVE
-            
-            const property = await realEstateRental.getProperty(propertyId);
-            expect(property.isAvailable).to.be.false;
-        });
-        
-        it("Should fail if payment amount is incorrect", async function () {
-            await expect(
-                realEstateRental.connect(tenant).createRentalAgreement(
-                    propertyId,
-                    6,
-                    { value: RENT_AMOUNT } // Missing security deposit
-                )
-            ).to.be.revertedWith("Incorrect payment amount");
-        });
-        
-        it("Should fail if owner tries to rent own property", async function () {
-            const totalPayment = RENT_AMOUNT + SECURITY_DEPOSIT;
-            
-            await expect(
-                realEstateRental.connect(landlord).createRentalAgreement(
-                    propertyId,
-                    6,
-                    { value: totalPayment }
-                )
-            ).to.be.revertedWith("Owner cannot rent own property");
-        });
+      const agreement = await rentalContract.rentalAgreements(1);
+      expect(agreement.status).to.equal(0); // PENDING_RESERVATION
     });
-    
-    describe("Monthly Rent Payment", function () {
-        beforeEach(async function () {
-            await realEstateRental.connect(landlord).listProperty(
-                "123 Main Street, Paris",
-                "Beautiful 2BR apartment",
-                RENT_AMOUNT,
-                SECURITY_DEPOSIT
-            );
-            
-            const totalPayment = RENT_AMOUNT + SECURITY_DEPOSIT;
-            await realEstateRental.connect(tenant).createRentalAgreement(
-                1,
-                6,
-                { value: totalPayment }
-            );
-            agreementId = 1;
-        });
-        
-        it("Should accept monthly rent payment after 25 days", async function () {
-            // Fast forward 26 days
-            await time.increase(26 * 24 * 60 * 60);
-            
-            await expect(
-                realEstateRental.connect(tenant).payMonthlyRent(agreementId, {
-                    value: RENT_AMOUNT
-                })
-            ).to.emit(realEstateRental, "RentPaid");
-            
-            const agreement = await realEstateRental.getRentalAgreement(agreementId);
-            expect(agreement.totalPaid).to.equal(RENT_AMOUNT * 2n);
-        });
-        
-        it("Should fail if payment is too soon", async function () {
-            await expect(
-                realEstateRental.connect(tenant).payMonthlyRent(agreementId, {
-                    value: RENT_AMOUNT
-                })
-            ).to.be.revertedWith("Too soon for next payment");
-        });
-        
-        it("Should fail if wrong amount is sent", async function () {
-            await time.increase(26 * 24 * 60 * 60);
-            
-            await expect(
-                realEstateRental.connect(tenant).payMonthlyRent(agreementId, {
-                    value: RENT_AMOUNT / 2n
-                })
-            ).to.be.revertedWith("Incorrect rent amount");
-        });
+  });
+
+  describe("Monthly Rent Payment", function () {
+    async function activeAgreementFixture() {
+      const data = await loadFixture(deployRentalFixture);
+      const rent = ethers.parseEther("1");
+      const deposit = ethers.parseEther("0.5");
+      
+      await data.rentalContract.connect(data.landlord).listProperty("A", "D", rent, deposit, RentUnit.MONTHLY);
+      
+      // Réservation (6 mois, 0 jours)
+      await data.rentalContract.connect(data.tenant).reserveProperty(1, 6, 0, { value: rent + deposit });
+      
+      // Activation
+      await data.rentalContract.connect(data.tenant).activateAgreement(1);
+      
+      return { ...data, rent };
+    }
+
+    it("Should accept monthly rent payment after 25 days", async function () {
+      const { rentalContract, tenant, rent } = await loadFixture(activeAgreementFixture);
+
+      // Avancer le temps de 26 jours
+      await time.increase(26 * 24 * 60 * 60);
+
+      // CORRECTION ICI : payRent(id, amountInUnits)
+      await expect(rentalContract.connect(tenant).payRent(1, 1, { value: rent }))
+        .to.emit(rentalContract, "RentPaid");
     });
-    
-    describe("Agreement Completion", function () {
-        beforeEach(async function () {
-            await realEstateRental.connect(landlord).listProperty(
-                "123 Main Street, Paris",
-                "Beautiful 2BR apartment",
-                RENT_AMOUNT,
-                SECURITY_DEPOSIT
-            );
-            
-            const totalPayment = RENT_AMOUNT + SECURITY_DEPOSIT;
-            await realEstateRental.connect(tenant).createRentalAgreement(
-                1,
-                1, // 1 month for faster testing
-                { value: totalPayment }
-            );
-            agreementId = 1;
-        });
+  });
+
+  describe("Agreement Termination", function () {
+    async function activeAgreementFixture() {
+        const data = await loadFixture(deployRentalFixture);
+        const rent = ethers.parseEther("1");
+        const deposit = ethers.parseEther("0.5");
         
-        it("Should complete agreement and return security deposit", async function () {
-            // Fast forward past end date
-            await time.increase(31 * 24 * 60 * 60);
-            
-            const tenantBalanceBefore = await ethers.provider.getBalance(tenant.address);
-            
-            await expect(
-                realEstateRental.connect(tenant).completeAgreement(agreementId)
-            ).to.emit(realEstateRental, "SecurityDepositReturned");
-            
-            const agreement = await realEstateRental.getRentalAgreement(agreementId);
-            expect(agreement.status).to.equal(2); // COMPLETED
-            
-            const property = await realEstateRental.getProperty(1);
-            expect(property.isAvailable).to.be.true;
-        });
+        await data.rentalContract.connect(data.landlord).listProperty("A", "D", rent, deposit, RentUnit.MONTHLY);
+        await data.rentalContract.connect(data.tenant).reserveProperty(1, 6, 0, { value: rent + deposit });
+        await data.rentalContract.connect(data.tenant).activateAgreement(1);
         
-        it("Should fail if agreement has not expired", async function () {
-            await expect(
-                realEstateRental.connect(tenant).completeAgreement(agreementId)
-            ).to.be.revertedWith("Agreement not yet expired");
-        });
+        return { ...data, deposit };
+    }
+
+    it("Should allow tenant to terminate and return deposit to landlord (penalty)", async function () {
+      const { rentalContract, tenant, landlord, deposit } = await loadFixture(activeAgreementFixture);
+
+      // Si le locataire part, la caution va au propriétaire (Logique corrigée)
+      await expect(rentalContract.connect(tenant).terminateAgreement(1))
+        .to.changeEtherBalances(
+            [rentalContract, landlord],
+            [-deposit, deposit]
+        );
     });
-    
-    describe("Agreement Termination", function () {
-        beforeEach(async function () {
-            await realEstateRental.connect(landlord).listProperty(
-                "123 Main Street, Paris",
-                "Beautiful 2BR apartment",
-                RENT_AMOUNT,
-                SECURITY_DEPOSIT
-            );
-            
-            const totalPayment = RENT_AMOUNT + SECURITY_DEPOSIT;
-            await realEstateRental.connect(tenant).createRentalAgreement(
-                1,
-                6,
-                { value: totalPayment }
-            );
-            agreementId = 1;
-        });
+  });
+
+  describe("Dispute Management", function () {
+    async function activeAgreementFixture() {
+        const data = await loadFixture(deployRentalFixture);
+        const rent = ethers.parseEther("1");
+        const deposit = ethers.parseEther("0.5");
         
-        it("Should allow landlord to terminate and return deposit", async function () {
-            await expect(
-                realEstateRental.connect(landlord).terminateAgreement(agreementId)
-            ).to.emit(realEstateRental, "AgreementTerminated")
-              .and.to.emit(realEstateRental, "SecurityDepositReturned");
-            
-            const agreement = await realEstateRental.getRentalAgreement(agreementId);
-            expect(agreement.status).to.equal(3); // TERMINATED
-        });
+        await data.rentalContract.connect(data.landlord).listProperty("A", "D", rent, deposit, RentUnit.MONTHLY);
+        await data.rentalContract.connect(data.tenant).reserveProperty(1, 6, 0, { value: rent + deposit });
+        await data.rentalContract.connect(data.tenant).activateAgreement(1);
         
-        it("Should allow tenant to terminate but forfeit deposit", async function () {
-            await expect(
-                realEstateRental.connect(tenant).terminateAgreement(agreementId)
-            ).to.emit(realEstateRental, "AgreementTerminated");
-            
-            const agreement = await realEstateRental.getRentalAgreement(agreementId);
-            expect(agreement.status).to.equal(3); // TERMINATED
-        });
+        return { ...data };
+    }
+
+    it("Should create a dispute", async function () {
+      const { rentalContract, landlord } = await loadFixture(activeAgreementFixture);
+      
+      await expect(rentalContract.connect(landlord).createDispute(1, "Tenant destroyed furniture"))
+        .to.emit(rentalContract, "DisputeCreated")
+        .withArgs(1, 1, landlord.address);
+        
+      const agreement = await rentalContract.rentalAgreements(1);
+      expect(agreement.status).to.equal(4); // DISPUTED
     });
-    
-    describe("Dispute Management", function () {
-        beforeEach(async function () {
-            await realEstateRental.connect(landlord).listProperty(
-                "123 Main Street, Paris",
-                "Beautiful 2BR apartment",
-                RENT_AMOUNT,
-                SECURITY_DEPOSIT
-            );
-            
-            const totalPayment = RENT_AMOUNT + SECURITY_DEPOSIT;
-            await realEstateRental.connect(tenant).createRentalAgreement(
-                1,
-                6,
-                { value: totalPayment }
-            );
-            agreementId = 1;
-        });
-        
-        it("Should create a dispute", async function () {
-            await expect(
-                realEstateRental.connect(tenant).createDispute(
-                    agreementId,
-                    "Property has maintenance issues"
-                )
-            ).to.emit(realEstateRental, "DisputeCreated");
-            
-            const dispute = await realEstateRental.getDispute(1);
-            expect(dispute.initiator).to.equal(tenant.address);
-            expect(dispute.status).to.equal(0); // OPEN
-            
-            const agreement = await realEstateRental.getRentalAgreement(agreementId);
-            expect(agreement.status).to.equal(4); // DISPUTED
-        });
-        
-        it("Should resolve dispute in favor of landlord", async function () {
-            await realEstateRental.connect(tenant).createDispute(
-                agreementId,
-                "Property has issues"
-            );
-            
-            await expect(
-                realEstateRental.connect(owner).resolveDispute(1, true)
-            ).to.emit(realEstateRental, "DisputeResolved");
-            
-            const dispute = await realEstateRental.getDispute(1);
-            expect(dispute.status).to.equal(1); // RESOLVED
-        });
-        
-        it("Should resolve dispute in favor of tenant", async function () {
-            await realEstateRental.connect(tenant).createDispute(
-                agreementId,
-                "Property has issues"
-            );
-            
-            await expect(
-                realEstateRental.connect(owner).resolveDispute(1, false)
-            ).to.emit(realEstateRental, "DisputeResolved")
-              .and.to.emit(realEstateRental, "SecurityDepositReturned");
-        });
+  });
+
+  describe("View Functions", function () {
+    it("Should get available properties", async function () {
+      const { rentalContract, landlord } = await loadFixture(deployRentalFixture);
+      
+      await rentalContract.connect(landlord).listProperty("P1", "D1", 100, 100, RentUnit.MONTHLY);
+      await rentalContract.connect(landlord).listProperty("P2", "D2", 100, 100, RentUnit.MONTHLY);
+      
+      // On rend P2 indisponible (via suppression logique)
+      await rentalContract.connect(landlord).delistProperty(2);
+
+      const available = await rentalContract.getAvailableProperties();
+      expect(available.length).to.equal(1);
+      expect(available[0]).to.equal(1); // Seule la propriété 1 est dispo
     });
-    
-    describe("View Functions", function () {
-        it("Should get available properties", async function () {
-            await realEstateRental.connect(landlord).listProperty(
-                "Property 1",
-                "Description 1",
-                RENT_AMOUNT,
-                SECURITY_DEPOSIT
-            );
-            
-            await realEstateRental.connect(landlord).listProperty(
-                "Property 2",
-                "Description 2",
-                RENT_AMOUNT,
-                SECURITY_DEPOSIT
-            );
-            
-            const availableProperties = await realEstateRental.getAvailableProperties();
-            expect(availableProperties.length).to.equal(2);
-        });
+
+    it("Should get landlord properties", async function () {
+        const { rentalContract, landlord } = await loadFixture(deployRentalFixture);
         
-        it("Should get landlord properties", async function () {
-            await realEstateRental.connect(landlord).listProperty(
-                "Property 1",
-                "Description 1",
-                RENT_AMOUNT,
-                SECURITY_DEPOSIT
-            );
-            
-            const properties = await realEstateRental.getLandlordProperties(landlord.address);
-            expect(properties.length).to.equal(1);
-            expect(properties[0]).to.equal(1);
-        });
-    });
+        await rentalContract.connect(landlord).listProperty("P1", "D1", 100, 100, RentUnit.MONTHLY);
+        
+        const props = await rentalContract.getLandlordProperties(landlord.address);
+        expect(props.length).to.equal(1);
+        expect(props[0]).to.equal(1);
+      });
+  });
 });

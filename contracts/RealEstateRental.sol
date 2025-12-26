@@ -121,7 +121,7 @@ contract RealEstateRental is ReentrancyGuard, Ownable {
         RentUnit _unit // Nouveau paramètre pour l'unité [NEW]
     ) external returns (uint256) {
         require(_rentBaseAmount > 0, "Rent must be greater than 0");
-        // Suppression de l'exigence `require(_securityDeposit > 0, ...)` pour permettre $0 de dépôt. [UPDATED]
+        // Suppression de l'exigence `require(_securityDeposit > 0, ...)` pour permettre $0 de dépôt. 
         
         propertyCounter++;
         properties[propertyCounter] = Property({
